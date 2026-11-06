@@ -19,7 +19,7 @@
 </head>
 <body>
 <div class="box">
-  <h2>🎬 视频指定大小压缩器（修复读取卡死 | veryfast）</h2>
+  <h2>🎬 视频指定大小压缩器（修复arrayBuffer卡死｜veryfast）</h2>
   <div class="row">
     <label>上传视频</label>
     <input type="file" id="fileInput" accept="video/*"/>
@@ -28,7 +28,7 @@
     <label>目标大小(MB，例如4)</label>
     <input type="number" id="targetMB" value="4" step="0.1" min="0.1"/>
   </div>
-  <div class="tip">说明：浏览器本地转码，不上传服务器；veryfast预设，速度更快，画质小幅下降；不再卡元数据</div>
+  <div class="tip">说明：浏览器本地转码，不上传服务器；veryfast预设；不再一次性读取全部文件到内存</div>
   <div class="row">
     <button id="startBtn" disabled>开始压缩</button>
   </div>
@@ -70,22 +70,25 @@ fileInput.onchange = async (e)=>{
   downloadBox.innerHTML = "";
   file = e.target.files[0];
   if(!file) return;
-  logEl.textContent = "读取视频信息（FFmpeg解析）...";
+  logEl.textContent = "ffprobe读取元数据（仅读头部）...";
   try {
-    const buf = await file.arrayBuffer();
-    await ffmpeg.writeFile("probe.mp4", new Uint8Array(buf));
-    // 用ffmpeg读取元数据，不依赖video标签
-    await ffmpeg.exec(["-i","probe.mp4","-f","null","-"]);
-    // 从日志提取时长
-    const match = logEl.textContent.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
-    if(match){
-      const h = Number(match[1]), m=Number(match[2]), s=Number(match[3]);
-      duration = h*3600 + m*60 + s;
+    // 直接写入File，不读arrayBuffer
+    await ffmpeg.writeFile("input.mp4", file);
+    // ffprobe只拿duration，超快，不解码画面
+    await ffmpeg.ffprobe([
+      "-v","error",
+      "-show_entries","format=duration",
+      "-of","default=noprint_wrappers=1:nokey=1",
+      "input.mp4"
+    ]);
+    const res = logEl.textContent.match(/(\d+\.?\d*)/);
+    if(res){
+      duration = parseFloat(res[1]);
       logEl.textContent += `\n✅ 解析成功，时长：${duration.toFixed(2)} 秒`;
       startBtn.disabled = false;
     }else{
       logEl.textContent += "\n⚠️ 自动读取时长失败，请手动输入时长(秒)";
-      const inp = prompt("视频总时长（秒）：", "60");
+      const inp = prompt("视频总时长（秒）：", "5");
       duration = parseFloat(inp);
       if(duration>0) startBtn.disabled = false;
     }
@@ -111,9 +114,7 @@ startBtn.onclick = async ()=>{
 
   logEl.textContent += `\n目标：${mb} MB\n总码率：${(totalBitrate/1000).toFixed(1)} kbps\n音频固定128kbps，视频码率：${(videoRate/1000).toFixed(1)} kbps\n开始转码...`
 
-  const buf = await file.arrayBuffer();
-  await ffmpeg.writeFile("input.mp4", new Uint8Array(buf));
-
+  // 重点：转码不再读取arrayBuffer，直接复用已经写入的 input.mp4
   await ffmpeg.exec([
     "-i","input.mp4",
     "-b:v", videoRate.toString(),
