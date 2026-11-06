@@ -1,127 +1,306 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>视频指定大小压缩工具</title>
-  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.7/dist/ffmpeg.min.js"></script>
-  <style>
-    * { box-sizing: border-box; font-family: system-ui; }
-    body { max-width: 700px; margin: 40px auto; padding: 0 20px; }
-    .box { border:1px solid #ddd; padding:24px; border-radius:12px; background:#fafafa; }
-    .row { margin:16px 0; }
-    input { padding:8px; width:100%; margin-top:6px; }
-    button { padding:10px 18px; background:#2563eb; color:white; border:none; border-radius:8px; cursor:pointer; }
-    button:disabled { background:#94a3b8; cursor:not-allowed; }
-    #log { margin-top:16px; padding:12px; background:#111; color:#0f0; font-family:monospace; font-size:13px; min-height:120px; white-space:pre-wrap; }
-    .tip { color:#666; font-size:14px; }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>视频压缩到指定大小</title>
+<style>
+  * { box-sizing: border-box; font-family: system-ui, -apple-system, "Microsoft YaHei", sans-serif; }
+  body { max-width: 720px; margin: 40px auto; padding: 0 20px; color: #111; }
+  .box { border: 1px solid #ddd; padding: 24px; border-radius: 12px; background: #fafafa; }
+  .row { margin: 16px 0; }
+  label { font-weight: 600; font-size: 14px; }
+  input { padding: 8px; width: 100%; margin-top: 6px; border: 1px solid #ccc; border-radius: 6px; }
+  button { padding: 10px 18px; background: #2563eb; color: #fff; border: none; border-radius: 8px; cursor: pointer; font-size: 15px; }
+  button:disabled { background: #94a3b8; cursor: not-allowed; }
+  #status { margin-top: 12px; font-size: 14px; color: #334155; min-height: 20px; }
+  progress { width: 100%; height: 10px; margin-top: 10px; }
+  #log { margin-top: 14px; padding: 12px; background: #111; color: #7CFC00; font-family: ui-monospace, Consolas, monospace;
+         font-size: 12px; height: 220px; overflow: auto; white-space: pre-wrap; border-radius: 8px; }
+  .tip { color: #666; font-size: 13px; margin-top: 6px; }
+  .err { color: #b91c1c; }
+</style>
 </head>
 <body>
 <div class="box">
-  <h2>🎬 视频指定大小压缩器（无ffprobe｜手动填时长 veryfast）</h2>
+  <h2>视频压缩到指定大小</h2>
+
   <div class="row">
-    <label>上传视频</label>
-    <input type="file" id="fileInput" accept="video/*"/>
+    <label for="fileInput">1. 选择视频</label>
+    <input type="file" id="fileInput" accept="video/*" />
   </div>
+
   <div class="row">
-    <label>目标大小(MB，例如4)</label>
-    <input type="number" id="targetMB" value="4" step="0.1" min="0.1"/>
+    <label for="targetMB">2. 目标大小（MB）</label>
+    <input type="number" id="targetMB" value="4" min="0.1" step="0.1" />
   </div>
-  <div class="tip">说明：浏览器本地转码，不上传服务器；veryfast；选中视频后手动输入时长（秒）</div>
+
+  <div class="row">
+    <label for="durationSec">3. 视频时长（秒，选文件后自动填）</label>
+    <input type="number" id="durationSec" min="0.1" step="0.1" placeholder="自动识别失败时手动填写" />
+    <div class="tip">体积 ≈ 码率 × 时长，时长不准就压不准。</div>
+  </div>
+
   <div class="row">
     <button id="startBtn" disabled>开始压缩</button>
   </div>
-  <div id="log">等待上传视频...</div>
+
+  <div id="status">正在加载 FFmpeg…</div>
+  <progress id="bar" value="0" max="100" hidden></progress>
+
+  <div id="log"></div>
   <div id="downloadBox"></div>
 </div>
 
 <script>
-const { FFmpeg } = FFmpegWASM;
-const ffmpeg = new FFmpeg();
-const logEl = document.getElementById("log");
-const startBtn = document.getElementById("startBtn");
-const fileInput = document.getElementById("fileInput");
-const targetMB = document.getElementById("targetMB");
-const downloadBox = document.getElementById("downloadBox");
+(function () {
+  'use strict';
 
-let file = null;
-let duration = 0;
+  var $ = function (id) { return document.getElementById(id); };
+  var logEl = $('log'), statusEl = $('status'), barEl = $('bar');
+  var startBtn = $('startBtn'), fileInput = $('fileInput');
+  var targetMB = $('targetMB'), durationSec = $('durationSec');
+  var downloadBox = $('downloadBox');
 
-ffmpeg.on("log", (msg)=>{
-  logEl.textContent += "\n" + msg.message;
-  logEl.scrollTop = logEl.scrollHeight;
-})
+  // 小文件（ffmpeg.js / 814.ffmpeg.js）必须同源放 vendor/，否则 worker 跨域会被拦。
+  // 32MB 内核优先用同目录 vendor/，没有就自动从 CDN 取并转成 blob。
+  var VENDOR = './vendor/';
+  var CORE_CDNS = [
+    'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/',
+    'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/'
+  ];
 
-async function loadCore(){
-  logEl.textContent = "正在加载FFmpeg内核...";
-  try{
-    await ffmpeg.load({
-      coreURL: "https://unpkg.com/@ffmpeg/core-st@0.12.6/dist/ffmpeg-core.js",
-      wasmURL: "https://unpkg.com/@ffmpeg/core-st@0.12.6/dist/ffmpeg-core.wasm"
+  var file = null;
+  var ffmpeg = null;
+  var busy = false;
+
+  function log(msg) {
+    logEl.textContent += msg + '\n';
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function setStatus(msg, isErr) {
+    statusEl.textContent = msg;
+    statusEl.className = isErr ? 'err' : '';
+  }
+
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = src;
+      s.onload = function () { resolve(); };
+      s.onerror = function () { reject(new Error('找不到 ' + src + '，请确认 vendor/ 已上传')); };
+      document.head.appendChild(s);
     });
-    logEl.textContent += "\n✅ FFmpeg加载成功，选择视频";
-  }catch(e){
-    logEl.textContent += "\n❌ 加载失败：" + e;
   }
-}
 
-fileInput.onchange = async (e)=>{
-  downloadBox.innerHTML = "";
-  file = e.target.files[0];
-  if(!file) return;
-  logEl.textContent = "已选中文件，请输入视频总时长（秒）";
-  // 直接弹窗手动输入时长，不再自动解析！
-  const inp = prompt("请输入视频时长，单位：秒\n例如5秒视频填：5", "5");
-  duration = parseFloat(inp);
-  if(!isNaN(duration) && duration>0){
-    logEl.textContent += `\n✅ 时长设置：${duration.toFixed(2)} 秒`;
+  function urlExists(url) {
+    return fetch(url, { method: 'HEAD', cache: 'no-store' })
+      .then(function (r) { return r.ok; })
+      .catch(function () { return false; });
+  }
+
+  // 下载成 blob URL（带进度），避免 worker 里 importScripts 跨域
+  async function fetchAsBlobURL(url, mime, onProgress) {
+    var res = await fetch(url);
+    if (!res.ok) throw new Error('下载失败 ' + res.status + '：' + url);
+
+    var total = Number(res.headers.get('content-length')) || 0;
+    if (!res.body || !onProgress) {
+      var b = await res.blob();
+      return URL.createObjectURL(new Blob([b], { type: mime }));
+    }
+
+    var reader = res.body.getReader();
+    var chunks = [], loaded = 0;
+    for (;;) {
+      var r = await reader.read();
+      if (r.done) break;
+      chunks.push(r.value);
+      loaded += r.value.length;
+      if (total) onProgress(loaded / total);
+    }
+    return URL.createObjectURL(new Blob(chunks, { type: mime }));
+  }
+
+  async function resolveCore() {
+    var localJS = new URL(VENDOR + 'ffmpeg-core.js', location.href).href;
+    var localWasm = new URL(VENDOR + 'ffmpeg-core.wasm', location.href).href;
+    if (await urlExists(localJS)) {
+      log('内核：使用同目录 vendor/ffmpeg-core.*');
+      return { coreURL: localJS, wasmURL: localWasm };
+    }
+
+    for (var i = 0; i < CORE_CDNS.length; i++) {
+      var base = CORE_CDNS[i];
+      try {
+        setStatus('正在下载内核（约 32MB，首次较慢）…');
+        var js = await fetchAsBlobURL(base + 'ffmpeg-core.js', 'text/javascript');
+        var wasm = await fetchAsBlobURL(base + 'ffmpeg-core.wasm', 'application/wasm', function (r) {
+          setStatus('内核下载 ' + (r * 100).toFixed(0) + '%…');
+        });
+        log('内核：使用 CDN ' + base);
+        return { coreURL: js, wasmURL: wasm };
+      } catch (e) {
+        log('内核 CDN 失败（' + base + '）：' + e.message);
+      }
+    }
+    throw new Error('拿不到 ffmpeg 内核，请把 ffmpeg-core.js/.wasm 放到 vendor/ 下');
+  }
+
+  async function initFFmpeg() {
+    await loadScript(VENDOR + 'ffmpeg.js');
+    if (!window.FFmpegWASM || !window.FFmpegWASM.FFmpeg) {
+      throw new Error('ffmpeg.js 没有导出 FFmpegWASM，确认是 0.12.x 的 umd 版本');
+    }
+
+    ffmpeg = new window.FFmpegWASM.FFmpeg();
+    ffmpeg.on('log', function (e) { log(e.message); });
+    ffmpeg.on('progress', function (e) {
+      if (!busy) return;
+      var p = Math.max(0, Math.min(100, (e.progress || 0) * 100));
+      barEl.value = p;
+      setStatus('转码中… ' + p.toFixed(0) + '%（别关页面）');
+    });
+
+    var core = await resolveCore();
+    setStatus('正在初始化内核…');
+    await ffmpeg.load({ coreURL: core.coreURL, wasmURL: core.wasmURL });
+    log('✅ FFmpeg 就绪');
+    setStatus('FFmpeg 已就绪，请选择视频');
+  }
+
+  fileInput.addEventListener('change', async function (e) {
+    downloadBox.innerHTML = '';
+    file = e.target.files && e.target.files[0];
+    if (!file) return;
+    if (!ffmpeg || !ffmpeg.loaded) {
+      setStatus('FFmpeg 还没加载好，等日志出现「FFmpeg 就绪」', true);
+      return;
+    }
+
+    log('已选择：' + file.name + '（' + (file.size / 1048576).toFixed(2) + ' MB）');
+    if (file.size > 700 * 1048576) log('⚠️ 文件偏大，浏览器内存可能不够');
+
+    try {
+      var d = await probeDuration(file);
+      if (d > 0) {
+        durationSec.value = d.toFixed(2);
+        log('时长：' + d.toFixed(2) + ' 秒');
+      }
+    } catch (err) {
+      log('时长识别失败，请手动填写秒数');
+    }
+    setStatus('准备好了，点「开始压缩」');
     startBtn.disabled = false;
-  }else{
-    logEl.textContent += "\n⚠️ 时长无效，请重新选择文件";
+  });
+
+  function probeDuration(f) {
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(f);
+      var v = document.createElement('video');
+      v.preload = 'metadata';
+      v.onloadedmetadata = function () {
+        var d = v.duration;
+        URL.revokeObjectURL(url);
+        if (isFinite(d) && d > 0) resolve(d); else reject(new Error('无法读取时长'));
+      };
+      v.onerror = function () { URL.revokeObjectURL(url); reject(new Error('无法读取时长')); };
+      v.src = url;
+    });
+  }
+
+  function buildArgs(videoKbps, audioKbps, outName, downscale) {
+    var args = ['-i', 'input.mp4'];
+    if (downscale) args = args.concat(['-vf', "scale='min(1280,iw)':-2"]);
+    return args.concat([
+      '-c:v', 'libx264', '-preset', 'veryfast',
+      '-b:v', videoKbps + 'k',
+      '-maxrate', Math.round(videoKbps * 1.5) + 'k',
+      '-bufsize', Math.round(videoKbps * 3) + 'k',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', audioKbps + 'k',
+      '-movflags', '+faststart',
+      '-y', outName
+    ]);
+  }
+
+  startBtn.addEventListener('click', async function () {
+    if (busy) return;
+    if (!file) { setStatus('请先选择视频', true); return; }
+
+    var mb = parseFloat(targetMB.value);
+    var dur = parseFloat(durationSec.value);
+    if (!(mb > 0)) { setStatus('目标大小不合法', true); return; }
+    if (!(dur > 0)) { setStatus('请填写正确的视频时长（秒）', true); return; }
+
+    busy = true;
     startBtn.disabled = true;
-  }
-}
+    downloadBox.innerHTML = '';
+    barEl.hidden = false;
+    barEl.value = 0;
 
-startBtn.onclick = async ()=>{
-  startBtn.disabled = true;
-  downloadBox.innerHTML = "";
-  const mb = parseFloat(targetMB.value);
-  if(!mb || mb <= 0){
-    logEl.textContent += "\n❌ 目标大小非法";
-    startBtn.disabled = false;
-    return;
-  }
-  const totalBits = mb * 8 * 1024 * 1024;
-  const totalBitrate = Math.floor(totalBits / duration);
-  const audioRate = 128000;
-  let videoRate = totalBitrate - audioRate;
-  if(videoRate < 64000) videoRate = 64000;
+    var targetBytes = mb * 1024 * 1024;
+    var audioKbps = mb < 8 ? 64 : 96;
 
-  logEl.textContent += `\n目标：${mb} MB\n总码率：${(totalBitrate/1000).toFixed(1)} kbps\n音频固定128kbps，视频码率：${(videoRate/1000).toFixed(1)} kbps\n开始转码...`
+    try {
+      setStatus('正在把视频读进内存…');
+      var buf = new Uint8Array(await file.arrayBuffer());
+      await ffmpeg.writeFile('input.mp4', buf);
+      buf = null;
+      log('已写入 FFmpeg 文件系统');
 
-  await ffmpeg.writeFile("input.mp4", file);
+      var totalKbps = (targetBytes * 8 / dur) / 1000 * 0.97;
+      var videoKbps = Math.max(50, Math.round(totalKbps - audioKbps));
+      if (totalKbps < audioKbps + 60) log('⚠️ 目标偏小，接近极限，会尽量逼近');
 
-  await ffmpeg.exec([
-    "-i","input.mp4",
-    "-b:v", videoRate.toString(),
-    "-b:a","128k",
-    "-c:v","libx264",
-    "-c:a","aac",
-    "-preset","veryfast",
-    "-y",
-    "output.mp4"
-  ])
+      var result = null;
+      for (var attempt = 1; attempt <= 3; attempt++) {
+        log('第 ' + attempt + ' 遍：视频 ' + videoKbps + ' kbps / 音频 ' + audioKbps + ' kbps');
+        setStatus('转码中…');
 
-  const out = await ffmpeg.readFile("output.mp4");
-  const blob = new Blob([out], {type:"video/mp4"});
-  const url = URL.createObjectURL(blob);
-  downloadBox.innerHTML = `<br><a href="${url}" download="compressed_${mb}MB.mp4"><button>📥 下载压缩后的视频</button></a>`;
-  logEl.textContent += "\n✅ 压缩完成！";
-  startBtn.disabled = false;
-}
+        var code = await ffmpeg.exec(buildArgs(videoKbps, audioKbps, 'output.mp4', videoKbps < 700));
+        if (code !== 0) throw new Error('ffmpeg 退出码 ' + code + '（看上方日志）');
 
-loadCore();
+        var data = await ffmpeg.readFile('output.mp4');
+        log('产出：' + (data.byteLength / 1048576).toFixed(2) + ' MB');
+
+        if (data.byteLength <= targetBytes * 1.01) { result = data; break; }
+
+        videoKbps = Math.max(50, Math.floor(videoKbps * (targetBytes / data.byteLength) * 0.97));
+        await ffmpeg.deleteFile('output.mp4');
+        log('超出目标，收紧到 ' + videoKbps + ' kbps 重试');
+      }
+
+      if (!result) result = await ffmpeg.readFile('output.mp4');
+
+      var blob = new Blob([result], { type: 'video/mp4' });
+      var url = URL.createObjectURL(blob);
+      downloadBox.innerHTML =
+        '<p>✅ 完成：<b>' + (blob.size / 1048576).toFixed(2) + ' MB</b>（目标 ' + mb + ' MB）</p>' +
+        '<a href="' + url + '" download="compressed_' + mb + 'MB.mp4"><button>📥 下载压缩后的视频</button></a>';
+      setStatus('压缩完成');
+      log('✅ 完成，输出 ' + (blob.size / 1048576).toFixed(2) + ' MB');
+
+      ffmpeg.deleteFile('input.mp4').catch(function () {});
+    } catch (err) {
+      console.error(err);
+      log('❌ ' + (err && err.message ? err.message : err));
+      setStatus('失败：' + (err && err.message ? err.message : err), true);
+    } finally {
+      busy = false;
+      startBtn.disabled = false;
+      barEl.value = 0;
+      barEl.hidden = true;
+    }
+  });
+
+  initFFmpeg().catch(function (err) {
+    console.error(err);
+    setStatus('FFmpeg 加载失败：' + err.message, true);
+    log('❌ ' + err.message);
+    log('按 F12 看 Network：404 = 路径不对；一直 pending = 还没下载完。');
+  });
+})();
 </script>
 </body>
 </html>
