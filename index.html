@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>视频指定大小压缩工具</title>
+  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.7/dist/ffmpeg.min.js"></script>
+  <style>
+    * { box-sizing: border-box; font-family: system-ui; }
+    body { max-width: 700px; margin: 40px auto; padding: 0 20px; }
+    .box { border:1px solid #ddd; padding:24px; border-radius:12px; background:#fafafa; }
+    .row { margin:16px 0; }
+    input { padding:8px; width:100%; margin-top:6px; }
+    button { padding:10px 18px; background:#2563eb; color:white; border:none; border-radius:8px; cursor:pointer; }
+    button:disabled { background:#94a3b8; cursor:not-allowed; }
+    #log { margin-top:16px; padding:12px; background:#111; color:#0f0; font-family:monospace; font-size:13px; min-height:120px; white-space:pre-wrap; }
+    .tip { color:#666; font-size:14px; }
+  </style>
+</head>
+<body>
+<div class="box">
+  <h2>🎬 视频指定大小压缩器（单线程版，无需特殊头）</h2>
+  <div class="row">
+    <label>上传视频</label>
+    <input type="file" id="fileInput" accept="video/*"/>
+  </div>
+  <div class="row">
+    <label>目标大小(MB，例如4)</label>
+    <input type="number" id="targetMB" value="4" step="0.1" min="0.1"/>
+  </div>
+  <div class="tip">说明：浏览器本地转码，不上传服务器；单线程，大视频会比较慢</div>
+  <div class="row">
+    <button id="startBtn" disabled>开始压缩</button>
+  </div>
+  <div id="log">等待上传视频...</div>
+  <div id="downloadBox"></div>
+</div>
+
+<script>
+const { FFmpeg } = FFmpegWASM;
+const ffmpeg = new FFmpeg();
+const logEl = document.getElementById("log");
+const startBtn = document.getElementById("startBtn");
+const fileInput = document.getElementById("fileInput");
+const targetMB = document.getElementById("targetMB");
+const downloadBox = document.getElementById("downloadBox");
+
+let file = null;
+let duration = 0;
+
+ffmpeg.on("log", (msg)=>{
+  logEl.textContent += "\n" + msg.message;
+  logEl.scrollTop = logEl.scrollHeight;
+})
+
+async function loadCore(){
+  logEl.textContent = "正在加载FFmpeg内核...";
+  try{
+    // 重点：单线程core，不需要SharedArrayBuffer，不用COOP/COEP
+    await ffmpeg.load({
+      coreURL: "https://unpkg.com/@ffmpeg/core-st@0.12.6/dist/ffmpeg-core.js",
+      wasmURL: "https://unpkg.com/@ffmpeg/core-st@0.12.6/dist/ffmpeg-core.wasm"
+    });
+    logEl.textContent += "\n✅ FFmpeg加载成功，可以上传视频";
+  }catch(e){
+    logEl.textContent += "\n❌ 加载失败：" + e;
+  }
+}
+
+fileInput.onchange = async (e)=>{
+  downloadBox.innerHTML = "";
+  file = e.target.files[0];
+  if(!file) return;
+  logEl.textContent = "读取视频信息...";
+  const v = document.createElement("video");
+  v.src = URL.createObjectURL(file);
+  v.onloadedmetadata = ()=>{
+    duration = v.duration;
+    logEl.textContent = `✅ 视频已载入，时长：${duration.toFixed(2)} 秒`;
+    startBtn.disabled = false;
+  }
+}
+
+startBtn.onclick = async ()=>{
+  startBtn.disabled = true;
+  downloadBox.innerHTML = "";
+  const mb = parseFloat(targetMB.value);
+  if(!mb || mb <= 0){
+    logEl.textContent += "\n❌ 目标大小非法";
+    startBtn.disabled = false;
+    return;
+  }
+  const totalBits = mb * 8 * 1024 * 1024;
+  const totalBitrate = Math.floor(totalBits / duration);
+  const audioRate = 128000;
+  let videoRate = totalBitrate - audioRate;
+  if(videoRate < 64000) videoRate = 64000;
+
+  logEl.textContent += `\n目标：${mb} MB\n总码率：${(totalBitrate/1000).toFixed(1)} kbps\n音频固定128kbps，视频码率：${(videoRate/1000).toFixed(1)} kbps\n开始转码...`
+
+  const buf = await file.arrayBuffer();
+  await ffmpeg.writeFile("input.mp4", new Uint8Array(buf));
+
+  await ffmpeg.exec([
+    "-i","input.mp4",
+    "-b:v", videoRate.toString(),
+    "-b:a","128k",
+    "-c:v","libx264",
+    "-c:a","aac",
+    "-preset","fast",
+    "-y",
+    "output.mp4"
+  ])
+
+  const out = await ffmpeg.readFile("output.mp4");
+  const blob = new Blob([out], {type:"video/mp4"});
+  const url = URL.createObjectURL(blob);
+  downloadBox.innerHTML = `<br><a href="${url}" download="compressed_${mb}MB.mp4"><button>📥 下载压缩后的视频</button></a>`;
+  logEl.textContent += "\n✅ 压缩完成！";
+  startBtn.disabled = false;
+}
+
+loadCore();
+</script>
+</body>
+</html>
