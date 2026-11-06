@@ -19,7 +19,7 @@
 </head>
 <body>
 <div class="box">
-  <h2>🎬 视频指定大小压缩器（单线程版，无需特殊头）</h2>
+  <h2>🎬 视频指定大小压缩器（单线程版，veryfast提速）</h2>
   <div class="row">
     <label>上传视频</label>
     <input type="file" id="fileInput" accept="video/*"/>
@@ -28,7 +28,7 @@
     <label>目标大小(MB，例如4)</label>
     <input type="number" id="targetMB" value="4" step="0.1" min="0.1"/>
   </div>
-  <div class="tip">说明：浏览器本地转码，不上传服务器；单线程，大视频会比较慢</div>
+  <div class="tip">说明：浏览器本地转码，不上传服务器；veryfast预设，速度更快，画质小幅下降</div>
   <div class="row">
     <button id="startBtn" disabled>开始压缩</button>
   </div>
@@ -56,7 +56,6 @@ ffmpeg.on("log", (msg)=>{
 async function loadCore(){
   logEl.textContent = "正在加载FFmpeg内核...";
   try{
-    // 重点：单线程core，不需要SharedArrayBuffer，不用COOP/COEP
     await ffmpeg.load({
       coreURL: "https://unpkg.com/@ffmpeg/core-st@0.12.6/dist/ffmpeg-core.js",
       wasmURL: "https://unpkg.com/@ffmpeg/core-st@0.12.6/dist/ffmpeg-core.wasm"
@@ -107,7 +106,7 @@ startBtn.onclick = async ()=>{
     "-b:a","128k",
     "-c:v","libx264",
     "-c:a","aac",
-    "-preset","fast",
+    "-preset","veryfast",
     "-y",
     "output.mp4"
   ])
